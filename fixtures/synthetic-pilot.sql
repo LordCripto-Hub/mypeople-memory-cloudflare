@@ -1,6 +1,6 @@
 -- Synthetic-only fixture for isolation and recall tests.
 -- Never replace these rows with real project data during the pilot.
-INSERT INTO entries (project_slug,id,content,tags,source,source_type,source_uri,repository,created_by_agent,verified_by,verified_at,created_at,updated_at,content_hash,status) VALUES
+INSERT OR IGNORE INTO entries (project_slug,id,content,tags,source,source_type,source_uri,repository,created_by_agent,verified_by,verified_at,created_at,updated_at,content_hash,status) VALUES
 ('pilot-alpha','a01','Alpha selects Codex Luna as its worker provider.','["synthetic","provider"]','fixture','synthetic-decision','git://synthetic/pilot-alpha/commit/a01','synthetic/pilot-alpha','fixture-generator','pilot-reviewer',1760000000001,1760000000001,1760000000001,'synthetic-a01','canonical'),
 ('pilot-alpha','a02','Alpha runs services with Docker Compose and named volumes.','["synthetic","runtime"]','fixture','synthetic-decision','git://synthetic/pilot-alpha/commit/a02','synthetic/pilot-alpha','fixture-generator','pilot-reviewer',1760000000002,1760000000002,1760000000002,'synthetic-a02','canonical'),
 ('pilot-alpha','a03','Alpha dispatches queue jobs asynchronously with fire-and-forget acknowledgement.','["synthetic","queue"]','fixture','synthetic-decision','git://synthetic/pilot-alpha/commit/a03','synthetic/pilot-alpha','fixture-generator','pilot-reviewer',1760000000003,1760000000003,1760000000003,'synthetic-a03','canonical'),
@@ -31,4 +31,3 @@ INSERT INTO entries (project_slug,id,content,tags,source,source_type,source_uri,
 ('pilot-gamma','g08','Gamma public documentation remains English and contains no personal notes.','["synthetic","documentation"]','fixture','synthetic-decision','git://synthetic/pilot-gamma/commit/g08','synthetic/pilot-gamma','fixture-generator','pilot-reviewer',1760000000028,1760000000028,1760000000028,'synthetic-g08','canonical'),
 ('pilot-gamma','g09','Gamma keeps separate provider profiles for each agent.','["synthetic","sessions"]','fixture','synthetic-decision','git://synthetic/pilot-gamma/commit/g09','synthetic/pilot-gamma','fixture-generator','pilot-reviewer',1760000000029,1760000000029,1760000000029,'synthetic-g09','canonical'),
 ('pilot-gamma','g10','Gamma has no Ollama dependency in its runtime.','["synthetic","provider"]','fixture','synthetic-decision','git://synthetic/pilot-gamma/commit/g10','synthetic/pilot-gamma','fixture-generator','pilot-reviewer',1760000000030,1760000000030,1760000000030,'synthetic-g10','canonical');
-

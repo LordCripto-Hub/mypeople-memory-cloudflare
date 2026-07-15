@@ -2,6 +2,7 @@
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "mypeople-memory-sandbox",
 	"main": "src/index.ts",
+	"workers_dev": true,
 	"compatibility_date": "2026-06-17",
 	"compatibility_flags": [
 		"nodejs_compat"
@@ -10,6 +11,7 @@
 		{
 			"binding": "DB",
 			"database_name": "mypeople-memory-sandbox-db",
+			"database_id": "f8e47b9e-bace-4f33-9d57-b4ed1d452fb6",
 			"migrations_dir": "migrations"
 		}
 	],
@@ -22,11 +24,6 @@
 	"ai": {
 		"binding": "AI"
 	},
-	"kv_namespaces": [
-		{
-			"binding": "OAUTH_KV"
-		}
-	],
 	"vars": {
 		"VECTORIZE_GRACE_MS": "300000",
 		"MYPEOPLE_PILOT_READ_ONLY": "true",

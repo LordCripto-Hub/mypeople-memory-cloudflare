@@ -37,6 +37,7 @@ export interface Env
   MYPEOPLE_PILOT_READ_ONLY?: string;
   MYPEOPLE_ALLOWED_PROJECTS?: string;
   MYPEOPLE_ENABLE_VECTOR_RECALL?: string;
+  OAUTH_KV: KVNamespace;
 }
 
 const LLM_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
