@@ -559,8 +559,7 @@ async function readStreamText(stream: ReadableStream): Promise<string> {
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
-  if (request.headers.get("Authorization") === `Bearer ${env.AUTH_TOKEN}`) return true;
-  return new URL(request.url).searchParams.get("token") === env.AUTH_TOKEN;
+  return request.headers.get("Authorization") === `Bearer ${env.AUTH_TOKEN}`;
 }
 
 function json(data: unknown, status = 200): Response {
