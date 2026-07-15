@@ -8,6 +8,11 @@ import { createMcpHandler } from "agents/mcp";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
+  buildStructuredRecall,
+  parseRecallInput,
+} from "./contracts/recall";
+import { parseProjectSlug } from "./contracts/project";
+import {
   INTEGRATION_PROVIDERS,
   getProvider,
   loadIntegration,
@@ -20,8 +25,19 @@ import type { IntegrationRecord, MirrorStore } from "./integrations";
 // Bindings come from the generated Cloudflare.Env (see `wrangler types`);
 // VECTORIZE_GRACE_MS is widened from its generated literal default so tests
 // and per-deploy vars can override it.
-export interface Env extends Omit<Cloudflare.Env, "VECTORIZE_GRACE_MS"> {
+export interface Env
+  extends Omit<
+    Cloudflare.Env,
+    | "VECTORIZE_GRACE_MS"
+    | "MYPEOPLE_PILOT_READ_ONLY"
+    | "MYPEOPLE_ALLOWED_PROJECTS"
+    | "MYPEOPLE_ENABLE_VECTOR_RECALL"
+  > {
   VECTORIZE_GRACE_MS?: string;
+  MYPEOPLE_PILOT_READ_ONLY?: string;
+  MYPEOPLE_ALLOWED_PROJECTS?: string;
+  MYPEOPLE_ENABLE_VECTOR_RECALL?: string;
+  OAUTH_KV: KVNamespace;
 }
 
 const LLM_MODEL = "@cf/meta/llama-4-scout-17b-16e-instruct";
@@ -559,8 +575,7 @@ async function readStreamText(stream: ReadableStream): Promise<string> {
 }
 
 function isAuthorized(request: Request, env: Env): boolean {
-  if (request.headers.get("Authorization") === `Bearer ${env.AUTH_TOKEN}`) return true;
-  return new URL(request.url).searchParams.get("token") === env.AUTH_TOKEN;
+  return request.headers.get("Authorization") === `Bearer ${env.AUTH_TOKEN}`;
 }
 
 function json(data: unknown, status = 200): Response {
@@ -910,6 +925,7 @@ export function chunkText(text: string, maxChars = CHUNK_MAX_CHARS, overlapChars
 interface VectorizeMatch {
   id: string;
   score: number;
+  namespace?: string;
   metadata?: Record<string, unknown>;
 }
 
@@ -1616,6 +1632,11 @@ export interface RecallMatch {
   createdAt: number;
   tags: string[];
   source: string;
+  projectSlug?: string;
+  sourceUri?: string;
+  sourceType?: string;
+  updatedAt?: number;
+  status?: string;
   isUpdate: boolean;
   hop: number; // 0 = direct match; ≥1 = surfaced via graph expansion (issue #16)
 }
@@ -1722,6 +1743,152 @@ function fuseDenseAndKeyword(
     }
   }
   return out;
+}
+
+export async function projectScopedRecallEntries(
+  params: {
+    projectSlug: string;
+    query: string;
+    topK: number;
+    hops?: number;
+  },
+  env: Env,
+  _ctx: ExecutionContext,
+): Promise<RecallSearchResult> {
+  const parsed = parseRecallInput({
+    projectSlug: params.projectSlug,
+    query: params.query,
+    topK: params.topK,
+    hops: params.hops,
+  });
+  if (parsed.topK === undefined) {
+    throw new Error("Recall limit is required");
+  }
+
+  const now = Date.now();
+  const tokens = tokenizeQuery(parsed.query);
+  let semanticUnavailable = env.MYPEOPLE_ENABLE_VECTOR_RECALL !== "true";
+  let denseMatches: VectorizeMatch[] = [];
+  if (!semanticUnavailable) {
+    try {
+      const values = await embed(parsed.query, env);
+      const dense = await env.VECTORIZE.query(values, {
+        topK: parsed.topK,
+        namespace: parsed.projectSlug,
+        returnMetadata: "all",
+      });
+      denseMatches = (dense.matches as VectorizeMatch[]).filter((match) => {
+        const metadata = match.metadata as Record<string, unknown> | undefined;
+        const metadataProject =
+          metadata?.project_slug ?? metadata?.projectSlug;
+        return (
+          match.namespace === parsed.projectSlug &&
+          metadataProject === parsed.projectSlug
+        );
+      });
+    } catch (error) {
+      console.error("Project-scoped Vectorize query failed:", error);
+      semanticUnavailable = true;
+    }
+  }
+
+  const columns =
+    "id, project_slug, content, tags, source_type, source_uri, created_at, updated_at, status";
+  let keywordRows: Record<string, any>[] = [];
+  if (tokens.length > 0) {
+    const keywordWhere = tokens.map(() => "content LIKE ?").join(" OR ");
+    const { results } = await env.DB.prepare(
+      `SELECT ${columns} FROM entries
+       WHERE project_slug = ?
+         AND status != 'deprecated'
+         AND (valid_from IS NULL OR valid_from <= ?)
+         AND (valid_until IS NULL OR valid_until > ?)
+         AND (${keywordWhere})
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+    ).bind(
+      parsed.projectSlug,
+      now,
+      now,
+      ...tokens.map((token) => `%${token}%`),
+      parsed.topK,
+    ).all();
+    keywordRows = results as Record<string, any>[];
+  }
+
+  const candidateIds = new Set<string>();
+  for (const match of denseMatches) {
+    const metadata = match.metadata as Record<string, unknown> | undefined;
+    const parentId = metadata?.parentId ?? match.id;
+    if (typeof parentId === "string" && parentId.length > 0) {
+      candidateIds.add(parentId);
+    }
+  }
+  for (const row of keywordRows) {
+    if (typeof row.id === "string") candidateIds.add(row.id);
+  }
+  if (candidateIds.size === 0) {
+    return { matches: [], insight: "", semanticUnavailable };
+  }
+
+  const ids = [...candidateIds];
+  const placeholders = ids.map(() => "?").join(", ");
+  const { results } = await env.DB.prepare(
+    `SELECT ${columns} FROM entries
+     WHERE project_slug = ?
+       AND id IN (${placeholders})
+       AND status != 'deprecated'
+       AND (valid_from IS NULL OR valid_from <= ?)
+       AND (valid_until IS NULL OR valid_until > ?)`,
+  ).bind(parsed.projectSlug, ...ids, now, now).all();
+
+  const denseScores = new Map<string, number>();
+  for (const match of denseMatches) {
+    const metadata = match.metadata as Record<string, unknown> | undefined;
+    const parentId = metadata?.parentId ?? match.id;
+    if (typeof parentId === "string") {
+      denseScores.set(
+        parentId,
+        Math.max(denseScores.get(parentId) ?? 0, match.score),
+      );
+    }
+  }
+  const keywordIds = new Set(keywordRows.map((row) => String(row.id)));
+
+  const matches = (results as Record<string, any>[])
+    .filter(
+      (row) =>
+        row.project_slug === parsed.projectSlug &&
+        candidateIds.has(String(row.id)),
+    )
+    .map((row): RecallMatch => ({
+      id: String(row.id),
+      projectSlug: String(row.project_slug),
+      content: row.content,
+      sourceUri: row.source_uri,
+      sourceType: row.source_type,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      status: row.status,
+      score:
+        (denseScores.get(String(row.id)) ?? 0) +
+        (keywordIds.has(String(row.id)) ? 0.5 : 0),
+      tags: JSON.parse(row.tags ?? "[]"),
+      source: row.source_type,
+      isUpdate: false,
+      hop: 0,
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, parsed.topK);
+
+  const maxScore = matches.reduce((maximum, match) => {
+    return Math.max(maximum, match.score);
+  }, 0);
+  if (maxScore > 0) {
+    for (const match of matches) match.score /= maxScore;
+  }
+
+  return { matches, insight: "", semanticUnavailable };
 }
 
 export async function recallEntries(
@@ -2293,7 +2460,115 @@ async function runScheduledIntegrationSync(env: Env): Promise<void> {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
-function buildMcpServer(env: Env, ctx: ExecutionContext): McpServer {
+interface PilotPrincipal {
+  principalId: string;
+  allowedProjects: string[];
+  scopes: string[];
+}
+
+function pilotReadOnlyEnabled(env: Env): boolean {
+  return env.MYPEOPLE_PILOT_READ_ONLY !== "allow-legacy-writes";
+}
+
+function pilotAllowedProjects(env: Env): string[] {
+  return (env.MYPEOPLE_ALLOWED_PROJECTS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0)
+    .map((value) => parseProjectSlug(value));
+}
+
+function requirePilotReadAccess(
+  principalValue: unknown,
+  projectSlug: string,
+): PilotPrincipal {
+  if (
+    typeof principalValue !== "object" ||
+    principalValue === null ||
+    Array.isArray(principalValue)
+  ) {
+    throw new Error("Missing pilot principal");
+  }
+  const principal = principalValue as Partial<PilotPrincipal>;
+  if (
+    typeof principal.principalId !== "string" ||
+    !Array.isArray(principal.allowedProjects) ||
+    !Array.isArray(principal.scopes) ||
+    !principal.allowedProjects.includes(projectSlug) ||
+    !principal.scopes.includes("memory:read")
+  ) {
+    throw new Error("Principal is not authorized for this project");
+  }
+  return principal as PilotPrincipal;
+}
+
+function buildPilotMcpServer(
+  env: Env,
+  ctx: ExecutionContext,
+  recall: typeof projectScopedRecallEntries,
+): McpServer {
+  const server = new McpServer({
+    name: "mypeople-memory-pilot",
+    version: "1.0.0",
+  });
+
+  server.registerTool(
+    "recall",
+    {
+      description: "Recall up to three direct, project-scoped memory claims.",
+      inputSchema: {
+        projectSlug: z.string().describe("Required lowercase project identity"),
+        query: z.string().describe("Natural language search query"),
+        limit: z.number().int().min(1).max(3).describe("Maximum number of claims"),
+        hops: z.literal(0).describe("Direct matches only"),
+      },
+    },
+    async ({ projectSlug, query, limit, hops }) => {
+      const parsed = parseRecallInput({ projectSlug, query, limit, hops });
+      requirePilotReadAccess(
+        (ctx as ExecutionContext & { props?: unknown }).props,
+        parsed.projectSlug,
+      );
+      if (parsed.topK === undefined) {
+        throw new Error("Recall limit is required");
+      }
+
+      const { matches, insight, semanticUnavailable } = await recall(
+        {
+          projectSlug: parsed.projectSlug,
+          query: parsed.query,
+          topK: parsed.topK,
+          hops: parsed.hops,
+        },
+        env,
+        ctx,
+      );
+      const notice = semanticUnavailable
+        ? "Note: semantic search is unavailable; results are keyword-only.\n\n"
+        : "";
+      if (matches.length === 0) {
+        const empty = buildStructuredRecall(parsed.projectSlug, []);
+        empty.content[0].text = notice + empty.content[0].text;
+        return empty;
+      }
+
+      const result = buildStructuredRecall(parsed.projectSlug, matches);
+      result.content[0].text = notice + renderRecallText(matches, insight);
+      return result;
+    },
+  );
+  return server;
+}
+
+export function buildMcpServer(
+  env: Env,
+  ctx: ExecutionContext,
+  recall: typeof recallEntries = recallEntries,
+  pilotRecall: typeof projectScopedRecallEntries = projectScopedRecallEntries,
+): McpServer {
+  if (pilotReadOnlyEnabled(env)) {
+    return buildPilotMcpServer(env, ctx, pilotRecall);
+  }
   const server = new McpServer({ name: "second-brain", version: "1.0.0" });
 
   // ── remember ────────────────────────────────────────────────────────────
@@ -2465,29 +2740,58 @@ function buildMcpServer(env: Env, ctx: ExecutionContext): McpServer {
   server.registerTool(
     "recall",
     {
-      description: "Recall: semantically search your second brain for relevant notes and context. Call recall automatically at the start of every conversation and every 3-4 messages.",
+      description: "Recall up to three direct, project-scoped memory claims.",
       inputSchema: {
+        projectSlug: z.string().describe("Required lowercase project identity"),
         query: z.string().describe("Natural language search query"),
-        topK: z.number().int().min(1).max(20).default(5).describe("Number of results"),
+        limit: z.number().int().min(1).max(3).describe("Maximum number of claims"),
         tag: z.string().optional().describe("Filter by a specific tag"),
         after: z.number().int().optional().describe("Only return entries after this Unix ms timestamp"),
         before: z.number().int().optional().describe("Only return entries before this Unix ms timestamp"),
         kind: z.enum([...KIND_VALUES] as [string, ...string[]]).optional().describe("Filter to episodic (events) or semantic (facts/knowledge)"),
-        hops: z.number().int().min(0).max(3).default(0).describe("Graph expansion depth: 0 = direct matches only (default); 1–2 also surfaces related memories linked in the graph"),
+        hops: z.literal(0).describe("Direct matches only"),
       },
     },
-    async ({ query, topK, tag, after, before, kind, hops }) => {
-      const { matches, insight, semanticUnavailable } = await recallEntries({ query, topK, tag, after, before, kind: kind as MemoryKind | undefined, hops }, env, ctx);
+    async ({ projectSlug, query, limit, tag, after, before, kind, hops }) => {
+      const parsed = parseRecallInput({ projectSlug, query, limit, hops });
+      if (parsed.topK === undefined) {
+        throw new Error("Recall limit is required");
+      }
+      const { matches, insight, semanticUnavailable } = await recall({
+        query: parsed.query,
+        topK: parsed.topK,
+        tag,
+        after,
+        before,
+        kind: kind as MemoryKind | undefined,
+        hops: parsed.hops,
+      }, env, ctx);
 
       const notice = semanticUnavailable
         ? `Note: semantic search is unavailable because the Vectorize index is missing, so these are keyword matches only. Fix: ${VECTORIZE_FIX_HINT}.\n\n`
         : "";
 
       if (!matches.length) {
-        return { content: [{ type: "text", text: notice + "Nothing found matching that query." }] };
+        const empty = buildStructuredRecall(parsed.projectSlug, []);
+        empty.content[0].text = notice + empty.content[0].text;
+        return empty;
       }
 
-      return { content: [{ type: "text", text: notice + renderRecallText(matches, insight) }] };
+      const result = buildStructuredRecall(
+        parsed.projectSlug,
+        matches.map((match) => ({
+          id: match.id,
+          projectSlug: match.projectSlug,
+          content: match.content,
+          sourceUri: match.sourceUri,
+          sourceType: match.sourceType,
+          createdAt: match.createdAt,
+          updatedAt: match.updatedAt,
+          status: match.status,
+        })),
+      );
+      result.content[0].text = notice + renderRecallText(matches, insight);
+      return result;
     }
   );
 
@@ -2692,7 +2996,7 @@ export async function sanitizeToolsListResponse(response: Response): Promise<Res
 
 const apiHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    if (!dbReady) {
+    if (!pilotReadOnlyEnabled(env) && !dbReady) {
       ctx.waitUntil(initializeDatabase(env).then(() => { dbReady = true; }));
     }
     const server = buildMcpServer(env, ctx);
@@ -2703,6 +3007,36 @@ const apiHandler = {
 };
 
 // ─── Default handler — all non-MCP routes ────────────────────────────────────
+
+function pilotPrincipal(env: Env): PilotPrincipal {
+  return {
+    principalId: "service:mypeople-gateway",
+    allowedProjects: pilotAllowedProjects(env),
+    scopes: ["memory:read"],
+  };
+}
+
+async function pilotFetch(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (url.pathname === "/health" && request.method === "GET") {
+    return json({ ok: true, mode: "mypeople-read-only-pilot" });
+  }
+  if (url.pathname !== "/mcp") {
+    return json({ ok: false, error: "Not found" }, 404);
+  }
+  if (request.headers.get("Authorization") !== `Bearer ${env.AUTH_TOKEN}`) {
+    return json({ ok: false, error: "Unauthorized" }, 401);
+  }
+
+  const pilotContext = Object.assign(Object.create(ctx), {
+    props: pilotPrincipal(env),
+  }) as ExecutionContext;
+  return apiHandler.fetch(request, env, pilotContext);
+}
 
 const defaultHandler = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -2737,6 +3071,13 @@ const defaultHandler = {
         return Response.redirect(redirectTo, 302);
       }
       return new Response(loginHtml(), { headers: { "Content-Type": "text/html" } });
+    }
+
+    if (pilotReadOnlyEnabled(env)) {
+      if (url.pathname === "/health" && request.method === "GET") {
+        return json({ ok: true, mode: "mypeople-read-only-pilot" });
+      }
+      return json({ ok: false, error: "Not found" }, 404);
     }
 
     if (!dbReady) {
@@ -3483,8 +3824,11 @@ const oauthProvider = new OAuthProvider({
 
 export default {
   fetch: (req: Request, env: Env, ctx: ExecutionContext) =>
-    oauthProvider.fetch(req, env as any, ctx),
+    pilotReadOnlyEnabled(env)
+      ? pilotFetch(req, env, ctx)
+      : oauthProvider.fetch(req, env as any, ctx),
   scheduled: async (_event: ScheduledEvent, env: Env, ctx: ExecutionContext) => {
+    if (pilotReadOnlyEnabled(env)) return;
     ctx.waitUntil(runNightlyCompression(env, ctx));
     ctx.waitUntil(runGraphPass(env, ctx));
     ctx.waitUntil(runScheduledIntegrationSync(env));

@@ -21,6 +21,16 @@ describe("Auth", () => {
   let env: Env;
   beforeEach(() => { env = makeTestEnv(); });
 
+  it("rejects a valid credential supplied only in the query string", async () => {
+    const res = await worker.fetch(
+      req("GET", "/count?token=test-token", { token: null }),
+      env,
+      ctx,
+    );
+
+    expect(res.status).toBe(401);
+  });
+
   for (const [method, path, body] of PROTECTED_ROUTES) {
     it(`${method} ${path} — no token → 401`, async () => {
       const res = await worker.fetch(req(method, path, { body, token: null }), env, ctx);

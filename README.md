@@ -1,5 +1,11 @@
 # Second Brain
 
+> **MyPeople read-only pilot:** this branch adds a bounded, project-scoped MCP
+> recall service for MyPeople. It is intentionally not the upstream
+> capture-everything configuration. See
+> [MyPeople Pilot Operations](docs/MYPEOPLE-PILOT.md) before deploying or
+> connecting a client.
+
 **One shared memory for Claude, ChatGPT, Cursor, Codex, and every other AI tool you use.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)

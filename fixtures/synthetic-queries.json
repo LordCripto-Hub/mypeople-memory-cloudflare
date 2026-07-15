@@ -1,0 +1,17 @@
+[
+  { "projectSlug": "pilot-alpha", "query": "Codex Luna", "expectedIds": ["a01"] },
+  { "projectSlug": "pilot-alpha", "query": "Docker Compose volumes", "expectedIds": ["a02"] },
+  { "projectSlug": "pilot-alpha", "query": "Scorpion yellow theme", "expectedIds": ["a07"] },
+  { "projectSlug": "pilot-alpha", "query": "rejects Ollama", "expectedIds": ["a10"] },
+  { "projectSlug": "pilot-alpha", "query": "preserve role context", "expectedIds": ["a09"] },
+  { "projectSlug": "pilot-beta", "query": "selects Claude", "expectedIds": ["b01"] },
+  { "projectSlug": "pilot-beta", "query": "Podman ephemeral containers", "expectedIds": ["b02"] },
+  { "projectSlug": "pilot-beta", "query": "OAuth grants", "expectedIds": ["b05"] },
+  { "projectSlug": "pilot-beta", "query": "dark blue silver theme", "expectedIds": ["b07"] },
+  { "projectSlug": "pilot-beta", "query": "offline experiments", "expectedIds": ["b10"] },
+  { "projectSlug": "pilot-gamma", "query": "Codex Sol", "expectedIds": ["g01"] },
+  { "projectSlug": "pilot-gamma", "query": "pytest browser smoke", "expectedIds": ["g04"] },
+  { "projectSlug": "pilot-gamma", "query": "provenance gates", "expectedIds": ["g06"] },
+  { "projectSlug": "pilot-gamma", "query": "separate provider profiles", "expectedIds": ["g09"] },
+  { "projectSlug": "pilot-gamma", "query": "Ollama dependency", "expectedIds": ["g10"] }
+]
