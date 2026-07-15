@@ -8,6 +8,10 @@ import { createMcpHandler } from "agents/mcp";
 import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
+  buildStructuredRecall,
+  parseRecallInput,
+} from "./contracts/recall";
+import {
   INTEGRATION_PROVIDERS,
   getProvider,
   loadIntegration,
@@ -1615,6 +1619,11 @@ export interface RecallMatch {
   createdAt: number;
   tags: string[];
   source: string;
+  projectSlug?: string;
+  sourceUri?: string;
+  sourceType?: string;
+  updatedAt?: number;
+  status?: string;
   isUpdate: boolean;
   hop: number; // 0 = direct match; ≥1 = surfaced via graph expansion (issue #16)
 }
@@ -2292,7 +2301,11 @@ async function runScheduledIntegrationSync(env: Env): Promise<void> {
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
-function buildMcpServer(env: Env, ctx: ExecutionContext): McpServer {
+export function buildMcpServer(
+  env: Env,
+  ctx: ExecutionContext,
+  recall: typeof recallEntries = recallEntries,
+): McpServer {
   const server = new McpServer({ name: "second-brain", version: "1.0.0" });
 
   // ── remember ────────────────────────────────────────────────────────────
@@ -2464,29 +2477,58 @@ function buildMcpServer(env: Env, ctx: ExecutionContext): McpServer {
   server.registerTool(
     "recall",
     {
-      description: "Recall: semantically search your second brain for relevant notes and context. Call recall automatically at the start of every conversation and every 3-4 messages.",
+      description: "Recall up to three direct, project-scoped memory claims.",
       inputSchema: {
+        projectSlug: z.string().describe("Required lowercase project identity"),
         query: z.string().describe("Natural language search query"),
-        topK: z.number().int().min(1).max(20).default(5).describe("Number of results"),
+        limit: z.number().int().min(1).max(3).describe("Maximum number of claims"),
         tag: z.string().optional().describe("Filter by a specific tag"),
         after: z.number().int().optional().describe("Only return entries after this Unix ms timestamp"),
         before: z.number().int().optional().describe("Only return entries before this Unix ms timestamp"),
         kind: z.enum([...KIND_VALUES] as [string, ...string[]]).optional().describe("Filter to episodic (events) or semantic (facts/knowledge)"),
-        hops: z.number().int().min(0).max(3).default(0).describe("Graph expansion depth: 0 = direct matches only (default); 1–2 also surfaces related memories linked in the graph"),
+        hops: z.literal(0).describe("Direct matches only"),
       },
     },
-    async ({ query, topK, tag, after, before, kind, hops }) => {
-      const { matches, insight, semanticUnavailable } = await recallEntries({ query, topK, tag, after, before, kind: kind as MemoryKind | undefined, hops }, env, ctx);
+    async ({ projectSlug, query, limit, tag, after, before, kind, hops }) => {
+      const parsed = parseRecallInput({ projectSlug, query, limit, hops });
+      if (parsed.topK === undefined) {
+        throw new Error("Recall limit is required");
+      }
+      const { matches, insight, semanticUnavailable } = await recall({
+        query: parsed.query,
+        topK: parsed.topK,
+        tag,
+        after,
+        before,
+        kind: kind as MemoryKind | undefined,
+        hops: parsed.hops,
+      }, env, ctx);
 
       const notice = semanticUnavailable
         ? `Note: semantic search is unavailable because the Vectorize index is missing, so these are keyword matches only. Fix: ${VECTORIZE_FIX_HINT}.\n\n`
         : "";
 
       if (!matches.length) {
-        return { content: [{ type: "text", text: notice + "Nothing found matching that query." }] };
+        const empty = buildStructuredRecall(parsed.projectSlug, []);
+        empty.content[0].text = notice + empty.content[0].text;
+        return empty;
       }
 
-      return { content: [{ type: "text", text: notice + renderRecallText(matches, insight) }] };
+      const result = buildStructuredRecall(
+        parsed.projectSlug,
+        matches.map((match) => ({
+          id: match.id,
+          projectSlug: match.projectSlug,
+          content: match.content,
+          sourceUri: match.sourceUri,
+          sourceType: match.sourceType,
+          createdAt: match.createdAt,
+          updatedAt: match.updatedAt,
+          status: match.status,
+        })),
+      );
+      result.content[0].text = notice + renderRecallText(matches, insight);
+      return result;
     }
   );
 

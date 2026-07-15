@@ -19,6 +19,7 @@ export interface StructuredRecallClaim {
 }
 
 export interface StructuredRecallResult {
+  [key: string]: unknown;
   content: Array<{ type: "text"; text: string }>;
   structuredContent: { claims: StructuredRecallClaim[] };
 }
