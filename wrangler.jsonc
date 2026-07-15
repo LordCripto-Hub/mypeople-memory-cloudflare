@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "second-brain",
+	"name": "mypeople-memory-sandbox",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-17",
 	"compatibility_flags": [
@@ -9,13 +9,14 @@
 	"d1_databases": [
 		{
 			"binding": "DB",
-			"database_name": "second-brain-db"
+			"database_name": "mypeople-memory-sandbox-db",
+			"migrations_dir": "migrations"
 		}
 	],
 	"vectorize": [
 		{
 			"binding": "VECTORIZE",
-			"index_name": "second-brain-vectors"
+			"index_name": "mypeople-memory-sandbox-vectors"
 		}
 	],
 	"ai": {
@@ -27,17 +28,12 @@
 		}
 	],
 	"vars": {
-		"VECTORIZE_GRACE_MS": "300000"
+		"VECTORIZE_GRACE_MS": "300000",
+		"MYPEOPLE_PILOT_READ_ONLY": "true",
+		"MYPEOPLE_ALLOWED_PROJECTS": "pilot-alpha,pilot-beta,pilot-gamma",
+		"MYPEOPLE_ENABLE_VECTOR_RECALL": "false"
 	},
 	"secrets": {
 		"required": ["AUTH_TOKEN"]
-	},
-	"assets": {
-		"directory": "./public"
-	},
-	"triggers": {
-		"crons": [
-			"0 1 * * *"
-		]
 	}
 }
